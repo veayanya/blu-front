@@ -125,21 +125,16 @@ function setupRealtimeListeners() {
     }
   });
 
-  // Setelah koneksi SSE putus lalu tersambung lagi, sinkronkan ulang dari Neon.
-  // Ini menutup kemungkinan event terlewat saat browser/network offline.
+  // SSE bisa terputus/reconnect dan selama jeda ada event yang terlewat.
+  // Setelah koneksi pulih, ambil ulang snapshot dari Neon agar browser kembali sinkron.
   realtime.on('REALTIME_RECONNECTED', async () => {
-    if (!currentUser.value) return;
-    try {
-      const latest = await fetchRkis();
-      if (Array.isArray(latest)) {
-        state.rkis = latest;
-        if (state.activeAnalysis?.id) {
-          const refreshed = latest.find(r => r.id === state.activeAnalysis.id);
-          if (refreshed) state.activeAnalysis = refreshed;
-        }
-      }
-    } catch (error) {
-      console.warn('[Realtime] Gagal resync RKA setelah reconnect:', error?.message || error);
+    if (!isLoggedIn.value || !currentUser.value) return;
+    const rkis = await fetchRkis();
+    if (!Array.isArray(rkis)) return;
+    state.rkis = rkis;
+    if (state.activeAnalysis?.id) {
+      const freshActive = rkis.find(r => r.id === state.activeAnalysis.id);
+      state.activeAnalysis = freshActive || null;
     }
   });
 }

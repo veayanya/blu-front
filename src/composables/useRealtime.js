@@ -12,7 +12,7 @@ let reconnectTimer = null;
 let reconnectAttempt = 0;
 let manualDisconnect = false;
 
-const MIN_RECONNECT_MS = 2000;
+const MIN_RECONNECT_MS = 1500;
 const MAX_RECONNECT_MS = 30000;
 
 function getApiBaseUrl() {
@@ -27,11 +27,11 @@ function clearReconnectTimer() {
 }
 
 function scheduleReconnect() {
-  if (manualDisconnect || reconnectTimer || eventSource) return;
+  if (manualDisconnect || reconnectTimer || !localStorage.getItem('auth_token')) return;
 
   const delay = Math.min(
     MAX_RECONNECT_MS,
-    MIN_RECONNECT_MS * Math.pow(2, reconnectAttempt)
+    MIN_RECONNECT_MS * Math.pow(2, Math.min(reconnectAttempt, 5))
   );
   reconnectAttempt += 1;
 
@@ -41,35 +41,20 @@ function scheduleReconnect() {
   }, delay);
 }
 
-function closeEventSource() {
+function closeCurrentSource() {
   if (eventSource) {
-    try { eventSource.close(); } catch {}
+    eventSource.onopen = null;
+    eventSource.onmessage = null;
+    eventSource.onerror = null;
+    eventSource.close();
     eventSource = null;
-  }
-  isConnected.value = false;
-}
-
-function handleMessage(event) {
-  lastHeartbeat.value = new Date().toISOString();
-
-  try {
-    const data = JSON.parse(event.data);
-    if (data && data.type) {
-      triggerListeners(data.type, data.payload, data);
-    }
-  } catch (err) {
-    console.warn('[Realtime] Payload SSE tidak valid:', err.message);
   }
 }
 
 function connect() {
-  manualDisconnect = false;
-
-  if (eventSource || reconnectTimer) return;
+  if (manualDisconnect || eventSource || !localStorage.getItem('auth_token')) return;
 
   const token = localStorage.getItem('auth_token');
-  if (!token) return;
-
   const baseUrl = getApiBaseUrl();
   const sseUrl = `${baseUrl}/api/v1/realtime/stream?token=${encodeURIComponent(token)}`;
 
@@ -78,9 +63,8 @@ function connect() {
     eventSource = source;
 
     source.onopen = () => {
-      // Abaikan event dari koneksi lama yang sudah ditutup.
+      // Abaikan event dari EventSource lama yang sudah ditutup.
       if (eventSource !== source) return;
-
       const wasReconnect = reconnectAttempt > 0;
       reconnectAttempt = 0;
       isConnected.value = true;
@@ -97,19 +81,31 @@ function connect() {
 
     source.onmessage = (event) => {
       if (eventSource !== source) return;
-      handleMessage(event);
+      lastHeartbeat.value = new Date().toISOString();
+
+      try {
+        const data = JSON.parse(event.data);
+        if (data && data.type) {
+          if (data.type === 'CONNECTED') {
+            triggerListeners('REALTIME_CONNECTED', data.payload ?? data, data);
+            return;
+          }
+          triggerListeners(data.type, data.payload, data);
+        }
+      } catch (err) {
+        console.warn('[Realtime] Payload SSE tidak valid:', err.message);
+      }
     };
 
     source.onerror = () => {
       if (eventSource !== source) return;
-
       isConnected.value = false;
-      closeEventSource();
+      closeCurrentSource();
       scheduleReconnect();
     };
   } catch (err) {
     console.warn('[Realtime] Gagal inisialisasi SSE:', err.message);
-    closeEventSource();
+    isConnected.value = false;
     scheduleReconnect();
   }
 }
@@ -118,13 +114,15 @@ function disconnect() {
   manualDisconnect = true;
   clearReconnectTimer();
   reconnectAttempt = 0;
-  closeEventSource();
+  closeCurrentSource();
+  isConnected.value = false;
 }
 
-function reconnectNow() {
-  if (manualDisconnect) return;
+function reconnect() {
+  manualDisconnect = false;
   clearReconnectTimer();
-  closeEventSource();
+  closeCurrentSource();
+  isConnected.value = false;
   reconnectAttempt = 0;
   connect();
 }
@@ -138,12 +136,10 @@ function on(eventType, callback) {
 }
 
 function off(eventType, callback) {
-  if (eventListeners.has(eventType)) {
-    eventListeners.get(eventType).delete(callback);
-    if (eventListeners.get(eventType).size === 0) {
-      eventListeners.delete(eventType);
-    }
-  }
+  const listeners = eventListeners.get(eventType);
+  if (!listeners) return;
+  listeners.delete(callback);
+  if (listeners.size === 0) eventListeners.delete(eventType);
 }
 
 function triggerListeners(type, payload, raw) {
@@ -156,9 +152,9 @@ function triggerListeners(type, payload, raw) {
     }
   }
 
-  const wildcardListeners = eventListeners.get('*');
-  if (wildcardListeners) {
-    for (const cb of [...wildcardListeners]) {
+  const universal = eventListeners.get('*');
+  if (universal) {
+    for (const cb of [...universal]) {
       try { cb({ type, payload, raw }); } catch (e) {
         console.error('[Realtime Callback Error *]:', e);
       }
@@ -166,18 +162,31 @@ function triggerListeners(type, payload, raw) {
   }
 }
 
-// Bantu browser yang sempat offline / tab lama aktif kembali.
+// Browser/network lifecycle: jangan biarkan tab yang kembali online menunggu
+// exponential backoff terlalu lama.
 if (typeof window !== 'undefined') {
-  window.addEventListener('online', reconnectNow);
+  window.addEventListener('online', () => {
+    if (localStorage.getItem('auth_token')) reconnect();
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && localStorage.getItem('auth_token') && !eventSource) {
+      manualDisconnect = false;
+      connect();
+    }
+  });
 }
 
 export function useRealtime() {
   return {
     isConnected,
     lastHeartbeat,
-    connect,
+    connect: () => {
+      manualDisconnect = false;
+      connect();
+    },
+    reconnect,
     disconnect,
-    reconnectNow,
     on,
     off
   };
