@@ -124,6 +124,24 @@ function setupRealtimeListeners() {
       state.activeAnalysis = null;
     }
   });
+
+  // Setelah koneksi SSE putus lalu tersambung lagi, sinkronkan ulang dari Neon.
+  // Ini menutup kemungkinan event terlewat saat browser/network offline.
+  realtime.on('REALTIME_RECONNECTED', async () => {
+    if (!currentUser.value) return;
+    try {
+      const latest = await fetchRkis();
+      if (Array.isArray(latest)) {
+        state.rkis = latest;
+        if (state.activeAnalysis?.id) {
+          const refreshed = latest.find(r => r.id === state.activeAnalysis.id);
+          if (refreshed) state.activeAnalysis = refreshed;
+        }
+      }
+    } catch (error) {
+      console.warn('[Realtime] Gagal resync RKA setelah reconnect:', error?.message || error);
+    }
+  });
 }
 
 // Cek sesi yang sudah ada (cookie httpOnly atau Bearer token) saat pertama load
